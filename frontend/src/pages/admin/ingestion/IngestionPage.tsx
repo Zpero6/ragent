@@ -45,8 +45,8 @@ import {
   updateIngestionPipeline,
   uploadIngestionTask
 } from "@/services/ingestionService";
+import { getSystemSettings } from "@/services/settingsService";
 import { getErrorMessage } from "@/utils/error";
-
 const PIPELINE_PAGE_SIZE = 10;
 const TASK_PAGE_SIZE = 10;
 
@@ -1836,6 +1836,7 @@ interface TaskDialogProps {
 function TaskDialog({ open, pipelineOptions, onOpenChange, onSubmit, onUpload }: TaskDialogProps) {
   const [saving, setSaving] = useState(false);
   const [localFile, setLocalFile] = useState<File | null>(null);
+  const [maxFileSize, setMaxFileSize] = useState<number>(50 * 1024 * 1024);
   const form = useForm<TaskFormValues>({
     resolver: zodResolver(taskSchema),
     defaultValues: {
@@ -1894,6 +1895,9 @@ function TaskDialog({ open, pipelineOptions, onOpenChange, onSubmit, onUpload }:
         metadataJson: ""
       });
       setLocalFile(null);
+      getSystemSettings()
+        .then((settings) => setMaxFileSize(settings.upload.maxFileSize))
+        .catch(() => {});
     }
   }, [open, pipelineOptions, form]);
 
@@ -1916,6 +1920,11 @@ function TaskDialog({ open, pipelineOptions, onOpenChange, onSubmit, onUpload }:
     if (values.sourceType === "file") {
       if (!localFile) {
         toast.error("请选择文件");
+        return;
+      }
+      if (localFile.size > maxFileSize) {
+        const sizeMB = Math.floor(maxFileSize / 1024 / 1024);
+        toast.error(`上传文件大小超过限制，最大允许 ${sizeMB}MB`);
         return;
       }
       setSaving(true);
@@ -2131,11 +2140,15 @@ function UploadDialog({ open, pipelineOptions, onOpenChange, onSubmit }: UploadD
   const [pipelineId, setPipelineId] = useState(pipelineOptions[0]?.id || "");
   const [file, setFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
+  const [maxFileSize, setMaxFileSize] = useState<number>(50 * 1024 * 1024);
 
   useEffect(() => {
     if (open) {
       setPipelineId(pipelineOptions[0]?.id || "");
       setFile(null);
+      getSystemSettings()
+        .then((settings) => setMaxFileSize(settings.upload.maxFileSize))
+        .catch(() => {});
     }
   }, [open, pipelineOptions]);
 
@@ -2146,6 +2159,11 @@ function UploadDialog({ open, pipelineOptions, onOpenChange, onSubmit }: UploadD
     }
     if (!file) {
       toast.error("请选择文件");
+      return;
+    }
+    if (file.size > maxFileSize) {
+      const sizeMB = Math.floor(maxFileSize / 1024 / 1024);
+      toast.error(`上传文件大小超过限制，最大允许 ${sizeMB}MB`);
       return;
     }
     setSaving(true);

@@ -27,11 +27,14 @@ import com.nageoffer.ai.ragent.framework.exception.AbstractException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.tomcat.util.http.fileupload.impl.FileSizeLimitExceededException;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.validation.BindingResult;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import java.util.Optional;
 
@@ -42,6 +45,12 @@ import java.util.Optional;
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @Value("${spring.servlet.multipart.max-file-size:50MB}")
+    private String maxFileSize;
+
+    @Value("${spring.servlet.multipart.max-request-size:100MB}")
+    private String maxRequestSize;
 
     /**
      * 拦截参数验证异常
@@ -93,6 +102,22 @@ public class GlobalExceptionHandler {
     public Result<Void> notRoleException(HttpServletRequest request, NotRoleException ex) {
         log.warn("[{}] {} [auth] no-role: {}", request.getMethod(), getUrl(request), ex.getMessage());
         return Results.failure(BaseErrorCode.CLIENT_ERROR.code(), "权限不足");
+    }
+
+    /**
+     * 拦截文件上传大小超限异常
+     */
+    @ExceptionHandler(value = MaxUploadSizeExceededException.class)
+    public Result<Void> maxUploadSizeExceededException(HttpServletRequest request, MaxUploadSizeExceededException ex) {
+        log.warn("[{}] {} [upload] 文件上传大小超限: {}", request.getMethod(), getUrl(request), ex.getMessage());
+        String message;
+        if (ex.getCause() instanceof IllegalStateException
+                && ex.getCause().getCause() instanceof FileSizeLimitExceededException) {
+            message = "上传文件大小超过限制，单个文件最大允许 " + maxFileSize;
+        } else {
+            message = "上传请求大小超过限制，单次请求最大允许 " + maxRequestSize;
+        }
+        return Results.failure(BaseErrorCode.CLIENT_ERROR.code(), message);
     }
 
     /**

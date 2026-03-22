@@ -29,6 +29,8 @@ import com.nageoffer.ai.ragent.rag.controller.vo.SystemSettingsVO.AISettings;
 import com.nageoffer.ai.ragent.rag.controller.vo.SystemSettingsVO.DefaultSettings;
 import com.nageoffer.ai.ragent.rag.controller.vo.SystemSettingsVO.MemorySettings;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -49,12 +51,22 @@ public class RAGSettingsController {
     private final MemoryProperties memoryProperties;
     private final AIModelProperties aiModelProperties;
 
+    @Value("${spring.servlet.multipart.max-file-size:50MB}")
+    private DataSize maxFileSize;
+
+    @Value("${spring.servlet.multipart.max-request-size:100MB}")
+    private DataSize maxRequestSize;
+
     /**
      * 获取系统 RAG、AI 模型等配置信息
      */
     @GetMapping("/rag/settings")
     public Result<SystemSettingsVO> settings() {
         SystemSettingsVO response = SystemSettingsVO.builder()
+                .upload(SystemSettingsVO.UploadSettings.builder()
+                        .maxFileSize(maxFileSize.toBytes())
+                        .maxRequestSize(maxRequestSize.toBytes())
+                        .build())
                 .rag(SystemSettingsVO.RagSettings.builder()
                         .defaultConfig(toDefaultSettings(ragDefaultProperties))
                         .queryRewrite(SystemSettingsVO.QueryRewriteSettings.builder()

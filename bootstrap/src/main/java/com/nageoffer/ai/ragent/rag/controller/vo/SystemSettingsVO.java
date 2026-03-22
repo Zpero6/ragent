@@ -36,10 +36,12 @@ public class SystemSettingsVO {
 
     private RagSettings rag;
     private AISettings ai;
+    private UploadSettings upload;
 
-    public SystemSettingsVO(RagSettings rag, AISettings ai) {
+    public SystemSettingsVO(RagSettings rag, AISettings ai, UploadSettings upload) {
         this.rag = rag;
         this.ai = ai;
+        this.upload = upload;
     }
 
     public static SystemSettingsVOBuilder builder() {
@@ -49,6 +51,7 @@ public class SystemSettingsVO {
     public static class SystemSettingsVOBuilder {
         private RagSettings rag;
         private AISettings ai;
+        private UploadSettings upload;
 
         public SystemSettingsVOBuilder rag(RagSettings rag) {
             this.rag = rag;
@@ -60,9 +63,21 @@ public class SystemSettingsVO {
             return this;
         }
 
-        public SystemSettingsVO build() {
-            return new SystemSettingsVO(rag, ai);
+        public SystemSettingsVOBuilder upload(UploadSettings upload) {
+            this.upload = upload;
+            return this;
         }
+
+        public SystemSettingsVO build() {
+            return new SystemSettingsVO(rag, ai, upload);
+        }
+    }
+
+    @Data
+    @Builder
+    public static class UploadSettings {
+        private Long maxFileSize;
+        private Long maxRequestSize;
     }
 
     @Data

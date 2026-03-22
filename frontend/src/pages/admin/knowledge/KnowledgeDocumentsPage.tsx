@@ -30,6 +30,7 @@ import {
   getChunkLogsPage
 } from "@/services/knowledgeService";
 import { getIngestionPipelines, type IngestionPipeline } from "@/services/ingestionService";
+import { getSystemSettings } from "@/services/settingsService";
 import { getErrorMessage } from "@/utils/error";
 
 const PAGE_SIZE = 10;
@@ -936,6 +937,7 @@ function UploadDialog({ open, onOpenChange, onSubmit }: UploadDialogProps) {
   const [originalChunkSize, setOriginalChunkSize] = useState("512");
   const [pipelines, setPipelines] = useState<IngestionPipeline[]>([]);
   const [loadingPipelines, setLoadingPipelines] = useState(false);
+  const [maxFileSize, setMaxFileSize] = useState<number>(50 * 1024 * 1024);
 
   const form = useForm<UploadFormValues>({
     resolver: zodResolver(uploadSchema),
@@ -1000,6 +1002,9 @@ function UploadDialog({ open, onOpenChange, onSubmit }: UploadDialogProps) {
       setNoChunk(false);
       setOriginalChunkSize("512");
       loadPipelines();
+      getSystemSettings()
+        .then((settings) => setMaxFileSize(settings.upload.maxFileSize))
+        .catch(() => {});
     }
   }, [open, form]);
 
@@ -1039,6 +1044,11 @@ function UploadDialog({ open, onOpenChange, onSubmit }: UploadDialogProps) {
   const handleSubmit = async (values: UploadFormValues) => {
     if (values.sourceType === "file" && !file) {
       toast.error("请选择文件");
+      return;
+    }
+    if (values.sourceType === "file" && file && file.size > maxFileSize) {
+      const sizeMB = Math.floor(maxFileSize / 1024 / 1024);
+      toast.error(`上传文件大小超过限制，最大允许 ${sizeMB}MB`);
       return;
     }
     const chunkSize = parseNumber(values.chunkSize);
