@@ -39,7 +39,6 @@ import com.nageoffer.ai.ragent.core.parser.ParserType;
 import com.nageoffer.ai.ragent.framework.context.UserContext;
 import com.nageoffer.ai.ragent.framework.exception.ClientException;
 import com.nageoffer.ai.ragent.framework.mq.producer.MessageQueueProducer;
-import com.nageoffer.ai.ragent.infra.embedding.EmbeddingService;
 import com.nageoffer.ai.ragent.ingestion.dao.entity.IngestionPipelineDO;
 import com.nageoffer.ai.ragent.ingestion.dao.mapper.IngestionPipelineMapper;
 import com.nageoffer.ai.ragent.ingestion.domain.context.IngestionContext;
@@ -106,7 +105,6 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
     private final FileStorageService fileStorageService;
     private final VectorStoreService vectorStoreService;
     private final KnowledgeChunkService knowledgeChunkService;
-    private final EmbeddingService embeddingService;
     private final ObjectMapper objectMapper;
     private final KnowledgeDocumentScheduleService scheduleService;
     private final IngestionPipelineService ingestionPipelineService;
@@ -242,7 +240,6 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             long totalDuration = System.currentTimeMillis() - totalStartTime;
             updateChunkLog(chunkLog.getId(), DocumentStatus.SUCCESS.getCode(), savedCount,
                     extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration, null);
-
         } catch (Exception e) {
             log.error("文档分块任务执行失败：docId={}", docId, e);
             markChunkFailed(documentDO.getId());
@@ -555,17 +552,15 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             String collectionName = kbDO.getCollectionName();
             String embeddingModel = kbDO.getEmbeddingModel();
             List<KnowledgeChunkVO> chunks = knowledgeChunkService.listByDocId(docId);
-            List<VectorChunk> vectorChunks = chunks.parallelStream().map(each -> {
-                        List<Float> embed = embedContent(each.getContent(), embeddingModel);
-                        return VectorChunk.builder()
-                                .chunkId(each.getId())
-                                .content(each.getContent())
-                                .index(each.getChunkIndex())
-                                .embedding(toArray(embed))
-                                .build();
-                    })
-                    .toList();
+            List<VectorChunk> vectorChunks = chunks.stream().map(each ->
+                    VectorChunk.builder()
+                            .chunkId(each.getId())
+                            .content(each.getContent())
+                            .index(each.getChunkIndex())
+                            .build()
+            ).toList();
             if (CollUtil.isNotEmpty(vectorChunks)) {
+                chunkEmbeddingService.embed(vectorChunks, embeddingModel);
                 vectorStoreService.indexDocumentChunks(collectionName, docId, vectorChunks);
             }
         }
@@ -629,13 +624,6 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
 
     private String resolveCollectionName(String kbId) {
         return knowledgeBaseMapper.selectById(kbId).getCollectionName();
-    }
-
-    private List<Float> embedContent(String content, String embeddingModel) {
-        if (!StringUtils.hasText(embeddingModel)) {
-            return embeddingService.embed(content);
-        }
-        return embeddingService.embed(content, embeddingModel);
     }
 
     private boolean isScheduleEnabled(SourceType sourceType, KnowledgeDocumentUploadRequest request) {
@@ -740,13 +728,5 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         } catch (Exception e) {
             log.warn("删除文档存储文件失败, docId={}, fileUrl={}", documentDO.getId(), documentDO.getFileUrl(), e);
         }
-    }
-
-    private static float[] toArray(List<Float> list) {
-        float[] arr = new float[list.size()];
-        for (int i = 0; i < list.size(); i++) {
-            arr[i] = list.get(i);
-        }
-        return arr;
     }
 }

@@ -18,10 +18,11 @@
 package com.nageoffer.ai.ragent.knowledge.schedule;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
-import com.nageoffer.ai.ragent.framework.exception.ClientException;
 import com.nageoffer.ai.ragent.framework.context.LoginUser;
 import com.nageoffer.ai.ragent.framework.context.UserContext;
+import com.nageoffer.ai.ragent.framework.exception.ClientException;
 import com.nageoffer.ai.ragent.knowledge.config.KnowledgeScheduleProperties;
 import com.nageoffer.ai.ragent.knowledge.dao.entity.KnowledgeBaseDO;
 import com.nageoffer.ai.ragent.knowledge.dao.entity.KnowledgeDocumentDO;
@@ -34,7 +35,6 @@ import com.nageoffer.ai.ragent.knowledge.dao.mapper.KnowledgeDocumentScheduleMap
 import com.nageoffer.ai.ragent.knowledge.enums.DocumentStatus;
 import com.nageoffer.ai.ragent.knowledge.enums.ScheduleRunStatus;
 import com.nageoffer.ai.ragent.knowledge.enums.SourceType;
-import com.nageoffer.ai.ragent.knowledge.service.KnowledgeChunkService;
 import com.nageoffer.ai.ragent.knowledge.handler.RemoteFileFetcher;
 import com.nageoffer.ai.ragent.knowledge.service.impl.KnowledgeDocumentServiceImpl;
 import com.nageoffer.ai.ragent.rag.dto.StoredFileDTO;
@@ -44,8 +44,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.io.InputStream;
@@ -59,19 +57,6 @@ import java.util.concurrent.RejectedExecutionException;
 
 /**
  * 知识库文档定时刷新任务
- * <p>
- * 该组件负责定期扫描和执行知识库文档的自动刷新任务，主要用于处理URL类型的文档源
- * 支持基于Cron表达式的定时调度，并提供分布式锁机制以确保任务不会重复执行
- * </p>
- *
- * <p>主要功能：</p>
- * <ul>
- *   <li>定期扫描待执行的定时任务</li>
- *   <li>检查远程文件是否发生变化（基于ETag、Last-Modified、内容哈希）</li>
- *   <li>下载更新的远程文件并重新进行文档分块处理</li>
- *   <li>记录任务执行历史和状态</li>
- *   <li>支持分布式环境下的任务锁定机制</li>
- * </ul>
  */
 @Slf4j
 @Component
@@ -84,12 +69,9 @@ public class KnowledgeDocumentScheduleJob {
     private final KnowledgeDocumentScheduleExecMapper execMapper;
     private final KnowledgeDocumentMapper documentMapper;
     private final KnowledgeBaseMapper kbMapper;
-    private final KnowledgeChunkService knowledgeChunkService;
     private final KnowledgeDocumentServiceImpl documentService;
     private final FileStorageService fileStorageService;
     private final RemoteFileFetcher remoteFileFetcher;
-    private final PlatformTransactionManager transactionManager;
-    @Qualifier("knowledgeChunkExecutor")
     private final Executor knowledgeChunkExecutor;
     private final KnowledgeScheduleProperties scheduleProperties;
 
@@ -189,25 +171,40 @@ public class KnowledgeDocumentScheduleJob {
                 .build();
         execMapper.insert(exec);
 
+        String oldFileUrl = null;
+        StoredFileDTO stored = null;
+        boolean documentOccupied = false;
+        boolean switchedToNewFile = false;
         try (RemoteFileFetcher.RemoteFetchResult fetchResult = remoteFileFetcher.fetchIfChanged(
-                    document.getSourceLocation(),
-                    schedule.getLastEtag(),
-                    schedule.getLastModified(),
-                    schedule.getLastContentHash(),
-                    document.getDocName()
-            )) {
+                document.getSourceLocation(),
+                schedule.getLastEtag(),
+                schedule.getLastModified(),
+                schedule.getLastContentHash(),
+                document.getDocName()
+        )) {
             if (!fetchResult.changed()) {
                 markScheduleSkipped(schedule, exec.getId(), startTime, nextRunTime, fetchResult);
                 return;
             }
+
+            if (DocumentStatus.RUNNING.getCode().equals(document.getStatus())) {
+                markScheduleSkipped(schedule, exec.getId(), startTime, nextRunTime, "文档正在分块中，跳过本次调度");
+                return;
+            }
+
             renewLock(scheduleId);
+            if (!tryMarkDocumentRunning(document.getId())) {
+                markScheduleSkipped(schedule, exec.getId(), startTime, nextRunTime, "文档正在分块中，跳过本次调度");
+                return;
+            }
+            documentOccupied = true;
 
             KnowledgeBaseDO kbDO = kbMapper.selectById(document.getKbId());
             if (kbDO == null) {
                 throw new ClientException("知识库不存在");
             }
 
-            StoredFileDTO stored;
+            oldFileUrl = document.getFileUrl();
             try (InputStream tempIn = Files.newInputStream(fetchResult.tempFile())) {
                 stored = fileStorageService.upload(
                         kbDO.getCollectionName(),
@@ -218,32 +215,20 @@ public class KnowledgeDocumentScheduleJob {
                 );
             }
 
-            TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
-            txTemplate.executeWithoutResult(status -> {
-                knowledgeChunkService.deleteByDocId(String.valueOf(document.getId()));
-                KnowledgeDocumentDO update = new KnowledgeDocumentDO();
-                update.setId(document.getId());
-                update.setDocName(stored.getOriginalFilename());
-                update.setFileUrl(stored.getUrl());
-                update.setFileType(stored.getDetectedType());
-                update.setFileSize(stored.getSize());
-                update.setChunkCount(0);
-                update.setStatus(DocumentStatus.RUNNING.getCode());
-                update.setUpdatedBy(SYSTEM_USER);
-                documentMapper.updateById(update);
-            });
-
-            document.setDocName(stored.getOriginalFilename());
-            document.setFileUrl(stored.getUrl());
-            document.setFileType(stored.getDetectedType());
-            document.setFileSize(stored.getSize());
-            document.setChunkCount(0);
-            document.setStatus(DocumentStatus.RUNNING.getCode());
+            KnowledgeDocumentDO runtimeDoc = documentMapper.selectById(document.getId());
+            if (runtimeDoc == null) {
+                throw new ClientException("文档不存在");
+            }
+            runtimeDoc.setDocName(stored.getOriginalFilename());
+            runtimeDoc.setFileUrl(stored.getUrl());
+            runtimeDoc.setFileType(stored.getDetectedType());
+            runtimeDoc.setFileSize(stored.getSize());
+            runtimeDoc.setUpdatedBy(SYSTEM_USER);
 
             renewLock(scheduleId);
             UserContext.set(LoginUser.builder().username(SYSTEM_USER).build());
             try {
-                documentService.chunkDocument(document);
+                documentService.chunkDocument(runtimeDoc);
             } finally {
                 UserContext.clear();
             }
@@ -254,12 +239,26 @@ public class KnowledgeDocumentScheduleJob {
                 return;
             }
 
+            applyRefreshedFileMetadata(document.getId(), stored);
+            switchedToNewFile = true;
+
+            renewLock(scheduleId);
             markScheduleSuccess(schedule, exec.getId(), startTime, nextRunTime, fetchResult, stored);
         } catch (Exception e) {
             log.error("定时刷新失败: scheduleId={}, docId={}, kbId={}",
                     scheduleId, document.getId(), document.getKbId(), e);
-            markScheduleFailed(schedule, exec.getId(), startTime, nextRunTime, e.getMessage());
+            if (!switchedToNewFile) {
+                if (documentOccupied) {
+                    markDocumentFailedIfRunning(document.getId());
+                }
+                markScheduleFailed(schedule, exec.getId(), startTime, nextRunTime, e.getMessage());
+            }
         } finally {
+            if (switchedToNewFile) {
+                deleteOldFileQuietly(oldFileUrl, stored != null ? stored.getUrl() : null);
+            } else if (stored != null) {
+                deleteOldFileQuietly(stored.getUrl(), null);
+            }
             releaseLock(scheduleId);
         }
     }
@@ -295,6 +294,31 @@ public class KnowledgeDocumentScheduleJob {
         }
     }
 
+    private void markScheduleSkipped(KnowledgeDocumentScheduleDO schedule,
+                                     String execId,
+                                     Date startTime,
+                                     Date nextRunTime,
+                                     String message) {
+        Date endTime = new Date();
+        KnowledgeDocumentScheduleDO update = new KnowledgeDocumentScheduleDO();
+        update.setId(schedule.getId());
+        update.setCronExpr(schedule.getCronExpr());
+        update.setLastRunTime(startTime);
+        update.setNextRunTime(nextRunTime);
+        update.setLastStatus(ScheduleRunStatus.SKIPPED.getCode());
+        update.setLastError(message);
+        scheduleMapper.updateById(update);
+
+        if (execId != null) {
+            KnowledgeDocumentScheduleExecDO execUpdate = new KnowledgeDocumentScheduleExecDO();
+            execUpdate.setId(execId);
+            execUpdate.setStatus(ScheduleRunStatus.SKIPPED.getCode());
+            execUpdate.setMessage(message);
+            execUpdate.setEndTime(endTime);
+            execMapper.updateById(execUpdate);
+        }
+    }
+
     private void markScheduleSuccess(KnowledgeDocumentScheduleDO schedule,
                                      String execId,
                                      Date startTime,
@@ -302,18 +326,20 @@ public class KnowledgeDocumentScheduleJob {
                                      RemoteFileFetcher.RemoteFetchResult fetchResult,
                                      StoredFileDTO stored) {
         Date endTime = new Date();
-        KnowledgeDocumentScheduleDO update = new KnowledgeDocumentScheduleDO();
-        update.setId(schedule.getId());
-        update.setCronExpr(schedule.getCronExpr());
-        update.setLastRunTime(startTime);
-        update.setNextRunTime(nextRunTime);
-        update.setLastSuccessTime(endTime);
-        update.setLastStatus(ScheduleRunStatus.SUCCESS.getCode());
-        update.setLastError(null);
-        update.setLastEtag(fetchResult.etag());
-        update.setLastModified(fetchResult.lastModified());
-        update.setLastContentHash(fetchResult.contentHash());
-        scheduleMapper.updateById(update);
+        scheduleMapper.update(
+                null,
+                new LambdaUpdateWrapper<KnowledgeDocumentScheduleDO>()
+                        .set(KnowledgeDocumentScheduleDO::getCronExpr, schedule.getCronExpr())
+                        .set(KnowledgeDocumentScheduleDO::getLastRunTime, startTime)
+                        .set(KnowledgeDocumentScheduleDO::getNextRunTime, nextRunTime)
+                        .set(KnowledgeDocumentScheduleDO::getLastSuccessTime, endTime)
+                        .set(KnowledgeDocumentScheduleDO::getLastStatus, ScheduleRunStatus.SUCCESS.getCode())
+                        .set(KnowledgeDocumentScheduleDO::getLastError, null)
+                        .set(KnowledgeDocumentScheduleDO::getLastEtag, fetchResult.etag())
+                        .set(KnowledgeDocumentScheduleDO::getLastModified, fetchResult.lastModified())
+                        .set(KnowledgeDocumentScheduleDO::getLastContentHash, fetchResult.contentHash())
+                        .eq(KnowledgeDocumentScheduleDO::getId, schedule.getId())
+        );
 
         if (execId != null) {
             KnowledgeDocumentScheduleExecDO execUpdate = new KnowledgeDocumentScheduleExecDO();
@@ -356,13 +382,15 @@ public class KnowledgeDocumentScheduleJob {
     }
 
     private void disableSchedule(KnowledgeDocumentScheduleDO schedule, String reason) {
-        KnowledgeDocumentScheduleDO update = new KnowledgeDocumentScheduleDO();
-        update.setId(schedule.getId());
-        update.setEnabled(0);
-        update.setNextRunTime(null);
-        update.setLastStatus(ScheduleRunStatus.FAILED.getCode());
-        update.setLastError(truncate(reason));
-        scheduleMapper.updateById(update);
+        scheduleMapper.update(
+                null,
+                new LambdaUpdateWrapper<KnowledgeDocumentScheduleDO>()
+                        .set(KnowledgeDocumentScheduleDO::getEnabled, 0)
+                        .set(KnowledgeDocumentScheduleDO::getNextRunTime, null)
+                        .set(KnowledgeDocumentScheduleDO::getLastStatus, ScheduleRunStatus.FAILED.getCode())
+                        .set(KnowledgeDocumentScheduleDO::getLastError, truncate(reason))
+                        .eq(KnowledgeDocumentScheduleDO::getId, schedule.getId())
+        );
     }
 
     private boolean tryAcquireLock(String scheduleId, Date now, Date lockUntil) {
@@ -376,12 +404,14 @@ public class KnowledgeDocumentScheduleJob {
     }
 
     private void releaseLock(String scheduleId) {
-        UpdateWrapper<KnowledgeDocumentScheduleDO> updateWrapper = new UpdateWrapper<>();
-        updateWrapper.eq("id", scheduleId).eq("lock_owner", instanceId);
-        KnowledgeDocumentScheduleDO update = new KnowledgeDocumentScheduleDO();
-        update.setLockOwner(null);
-        update.setLockUntil(null);
-        scheduleMapper.update(update, updateWrapper);
+        scheduleMapper.update(
+                null,
+                new LambdaUpdateWrapper<KnowledgeDocumentScheduleDO>()
+                        .set(KnowledgeDocumentScheduleDO::getLockOwner, null)
+                        .set(KnowledgeDocumentScheduleDO::getLockUntil, null)
+                        .eq(KnowledgeDocumentScheduleDO::getId, scheduleId)
+                        .eq(KnowledgeDocumentScheduleDO::getLockOwner, instanceId)
+        );
     }
 
     private void renewLock(String scheduleId) {
@@ -394,6 +424,53 @@ public class KnowledgeDocumentScheduleJob {
         KnowledgeDocumentScheduleDO update = new KnowledgeDocumentScheduleDO();
         update.setLockUntil(lockUntil);
         scheduleMapper.update(update, updateWrapper);
+    }
+
+    private boolean tryMarkDocumentRunning(String docId) {
+        UpdateWrapper<KnowledgeDocumentDO> updateWrapper = new UpdateWrapper<>();
+        updateWrapper.eq("id", docId)
+                .eq("deleted", 0)
+                .eq("enabled", 1)
+                .ne("status", DocumentStatus.RUNNING.getCode());
+        KnowledgeDocumentDO update = new KnowledgeDocumentDO();
+        update.setStatus(DocumentStatus.RUNNING.getCode());
+        update.setUpdatedBy(SYSTEM_USER);
+        return documentMapper.update(update, updateWrapper) > 0;
+    }
+
+    private void markDocumentFailedIfRunning(String docId) {
+        UpdateWrapper<KnowledgeDocumentDO> updateWrapper = new UpdateWrapper<>();
+        updateWrapper.eq("id", docId)
+                .eq("status", DocumentStatus.RUNNING.getCode());
+        KnowledgeDocumentDO update = new KnowledgeDocumentDO();
+        update.setStatus(DocumentStatus.FAILED.getCode());
+        update.setUpdatedBy(SYSTEM_USER);
+        documentMapper.update(update, updateWrapper);
+    }
+
+    private void applyRefreshedFileMetadata(String docId, StoredFileDTO stored) {
+        KnowledgeDocumentDO update = new KnowledgeDocumentDO();
+        update.setId(docId);
+        update.setDocName(stored.getOriginalFilename());
+        update.setFileUrl(stored.getUrl());
+        update.setFileType(stored.getDetectedType());
+        update.setFileSize(stored.getSize());
+        update.setUpdatedBy(SYSTEM_USER);
+        int updated = documentMapper.updateById(update);
+        if (updated == 0) {
+            throw new ClientException("文档不存在");
+        }
+    }
+
+    private void deleteOldFileQuietly(String oldFileUrl, String newFileUrl) {
+        if (!StringUtils.hasText(oldFileUrl) || oldFileUrl.equals(newFileUrl)) {
+            return;
+        }
+        try {
+            fileStorageService.deleteByUrl(oldFileUrl);
+        } catch (Exception e) {
+            log.warn("定时刷新文件清理失败: {}", oldFileUrl, e);
+        }
     }
 
     private String resolveInstanceId() {

@@ -206,7 +206,7 @@ public class ThreadPoolExecutorConfig {
                 ThreadFactoryBuilder.create()
                         .setNamePrefix("kb_chunk_executor_")
                         .build(),
-                new ThreadPoolExecutor.CallerRunsPolicy()
+                new ThreadPoolExecutor.AbortPolicy()
         );
         return TtlExecutors.getTtlExecutor(executor);
     }
