@@ -135,6 +135,10 @@ public class ModelSelector {
         }
 
         AIModelProperties.ModelCandidate firstChoice = findCandidate(candidates, firstChoiceModelId);
+        if (firstChoice == null) {
+            log.warn("首选模型在候选列表中未找到: modelId={}", firstChoiceModelId);
+            return;
+        }
         candidates.remove(firstChoice);
         candidates.add(0, firstChoice);
     }
@@ -154,7 +158,7 @@ public class ModelSelector {
         String modelId = resolveId(candidate);
 
         // 检查熔断状态
-        if (healthStore.isOpen(modelId)) {
+        if (healthStore.isUnavailable(modelId)) {
             return null;
         }
 

@@ -21,18 +21,17 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import lombok.NoArgsConstructor;
 
 /**
  * OpenAI 协议风格 SSE 解析器
  * 支持从 delta/message 中提取 content，以及可选的 reasoning_content
  */
-final class OpenAIStyleSseParser {
+@NoArgsConstructor(access = lombok.AccessLevel.PRIVATE)
+public final class OpenAIStyleSseParser {
 
     private static final String DATA_PREFIX = "data:";
     private static final String DONE_MARKER = "[DONE]";
-
-    private OpenAIStyleSseParser() {
-    }
 
     static ParsedEvent parseLine(String line, Gson gson, boolean reasoningEnabled) {
         if (line == null || line.isBlank()) {

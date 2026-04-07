@@ -108,7 +108,7 @@ ai:
     ollama:
       url: http://localhost:11434
       endpoints:
-        chat: /api/chat
+        chat: /v1/chat/completions
         embedding: /api/embed
     bailian:
       url: https://dashscope.aliyuncs.com

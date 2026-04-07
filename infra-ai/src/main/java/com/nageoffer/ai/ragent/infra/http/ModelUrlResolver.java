@@ -19,6 +19,7 @@ package com.nageoffer.ai.ragent.infra.http;
 
 import com.nageoffer.ai.ragent.infra.config.AIModelProperties;
 import com.nageoffer.ai.ragent.infra.enums.ModelCapability;
+import lombok.NoArgsConstructor;
 
 import java.util.Map;
 
@@ -26,13 +27,8 @@ import java.util.Map;
  * 模型URL解析器
  * 用于解析AI模型的完整URL地址，支持从候选模型配置或提供商配置中获取URL
  */
+@NoArgsConstructor(access = lombok.AccessLevel.PRIVATE)
 public class ModelUrlResolver {
-
-    /**
-     * 私有构造函数，防止实例化工具类
-     */
-    private ModelUrlResolver() {
-    }
 
     /**
      * 解析模型URL地址

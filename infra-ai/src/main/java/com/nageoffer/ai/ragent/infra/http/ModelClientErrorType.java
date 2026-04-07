@@ -58,5 +58,24 @@ public enum ModelClientErrorType {
     /**
      * 供应商错误 - 模型提供商服务错误
      */
-    PROVIDER_ERROR
+    PROVIDER_ERROR;
+
+    /**
+     * 根据 HTTP 状态码推断错误类型
+     *
+     * @param status HTTP 状态码
+     * @return 对应的错误类型
+     */
+    public static ModelClientErrorType fromHttpStatus(int status) {
+        if (status == 401 || status == 403) {
+            return UNAUTHORIZED;
+        }
+        if (status == 429) {
+            return RATE_LIMITED;
+        }
+        if (status >= 500) {
+            return SERVER_ERROR;
+        }
+        return CLIENT_ERROR;
+    }
 }

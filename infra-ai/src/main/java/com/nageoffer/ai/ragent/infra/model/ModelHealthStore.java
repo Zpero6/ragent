@@ -23,6 +23,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 模型健康状态存储器
@@ -36,20 +37,24 @@ public class ModelHealthStore {
 
     private final Map<String, ModelHealth> healthById = new ConcurrentHashMap<>();
 
-    public boolean isOpen(String id) {
+    public boolean isUnavailable(String id) {
         ModelHealth health = healthById.get(id);
         if (health == null) {
             return false;
         }
-        return health.state == State.OPEN && health.openUntil > System.currentTimeMillis();
+        if (health.state == State.OPEN && health.openUntil > System.currentTimeMillis()) {
+            return true;
+        }
+        return health.state == State.HALF_OPEN && health.halfOpenInFlight;
     }
 
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     public boolean allowCall(String id) {
         if (id == null) {
             return false;
         }
         long now = System.currentTimeMillis();
-        final boolean[] allowed = {false};
+        AtomicBoolean allowed = new AtomicBoolean(false);
         healthById.compute(id, (k, v) -> {
             if (v == null) {
                 v = new ModelHealth();
@@ -60,7 +65,7 @@ public class ModelHealthStore {
                 }
                 v.state = State.HALF_OPEN;
                 v.halfOpenInFlight = true;
-                allowed[0] = true;
+                allowed.set(true);
                 return v;
             }
             if (v.state == State.HALF_OPEN) {
@@ -68,13 +73,13 @@ public class ModelHealthStore {
                     return v;
                 }
                 v.halfOpenInFlight = true;
-                allowed[0] = true;
+                allowed.set(true);
                 return v;
             }
-            allowed[0] = true;
+            allowed.set(true);
             return v;
         });
-        return allowed[0];
+        return allowed.get();
     }
 
     public void markSuccess(String id) {

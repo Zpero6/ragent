@@ -17,15 +17,16 @@
 
 package com.nageoffer.ai.ragent.infra.rerank;
 
-import com.google.gson.Gson;
+import cn.hutool.core.collection.CollUtil;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.nageoffer.ai.ragent.framework.convention.RetrievedChunk;
 import com.nageoffer.ai.ragent.infra.config.AIModelProperties;
-import com.nageoffer.ai.ragent.infra.enums.ModelProvider;
 import com.nageoffer.ai.ragent.infra.enums.ModelCapability;
+import com.nageoffer.ai.ragent.infra.enums.ModelProvider;
 import com.nageoffer.ai.ragent.infra.http.HttpMediaTypes;
+import com.nageoffer.ai.ragent.infra.http.HttpResponseHelper;
 import com.nageoffer.ai.ragent.infra.http.ModelClientErrorType;
 import com.nageoffer.ai.ragent.infra.http.ModelClientException;
 import com.nageoffer.ai.ragent.infra.http.ModelUrlResolver;
@@ -36,11 +37,9 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
-import okhttp3.ResponseBody;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -51,7 +50,6 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class BaiLianRerankClient implements RerankClient {
 
-    private final Gson gson = new Gson();
     private final OkHttpClient httpClient;
 
     @Override
@@ -81,14 +79,14 @@ public class BaiLianRerankClient implements RerankClient {
     }
 
     private List<RetrievedChunk> doRerank(String query, List<RetrievedChunk> candidates, int topN, ModelTarget target) {
-        AIModelProperties.ProviderConfig provider = requireProvider(target);
+        AIModelProperties.ProviderConfig provider = HttpResponseHelper.requireProvider(target, provider());
 
         if (candidates == null || candidates.isEmpty() || topN <= 0) {
             return List.of();
         }
 
         JsonObject reqBody = new JsonObject();
-        reqBody.addProperty("model", requireModel(target));
+        reqBody.addProperty("model", HttpResponseHelper.requireModel(target, provider()));
 
         JsonObject input = new JsonObject();
         input.addProperty("query", query);
@@ -107,36 +105,36 @@ public class BaiLianRerankClient implements RerankClient {
         reqBody.add("parameters", parameters);
 
         Request request = new Request.Builder()
-                .url(resolveUrl(provider, target))
+                .url(ModelUrlResolver.resolveUrl(provider, target.candidate(), ModelCapability.RERANK))
                 .post(RequestBody.create(reqBody.toString(), HttpMediaTypes.JSON))
-                .addHeader("Content-Type", HttpMediaTypes.JSON_UTF8_HEADER)
                 .addHeader("Authorization", "Bearer " + provider.getApiKey())
                 .build();
 
         JsonObject respJson;
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                String body = readBody(response.body());
-                log.warn("百炼 rerank 请求失败: status={}, body={}", response.code(), body);
+                String body = HttpResponseHelper.readBody(response.body());
+                log.warn("{} rerank 请求失败: status={}, body={}", provider(), response.code(), body);
                 throw new ModelClientException(
-                        "百炼 rerank 请求失败: HTTP " + response.code(),
-                        classifyStatus(response.code()),
+                        provider() + " rerank 请求失败: HTTP " + response.code(),
+                        ModelClientErrorType.fromHttpStatus(response.code()),
                         response.code()
                 );
             }
-            respJson = parseJsonBody(response.body());
+            respJson = HttpResponseHelper.parseJson(response.body(), provider());
         } catch (IOException e) {
-            throw new ModelClientException("百炼 rerank 请求失败: " + e.getMessage(), ModelClientErrorType.NETWORK_ERROR, null, e);
+            throw new ModelClientException(provider() + " rerank 请求失败: " + e.getMessage(), ModelClientErrorType.NETWORK_ERROR, null, e);
         }
 
         JsonObject output = requireOutput(respJson);
 
         JsonArray results = output.getAsJsonArray("results");
-        if (results == null || results.size() == 0) {
-            throw new ModelClientException("百炼 rerank results 为空", ModelClientErrorType.INVALID_RESPONSE, null);
+        if (CollUtil.isEmpty(results)) {
+            throw new ModelClientException(provider() + " rerank results 为空", ModelClientErrorType.INVALID_RESPONSE, null);
         }
 
         List<RetrievedChunk> reranked = new ArrayList<>();
+        Set<String> addedIds = new HashSet<>();
 
         for (JsonElement elem : results) {
             if (!elem.isJsonObject()) {
@@ -160,14 +158,9 @@ public class BaiLianRerankClient implements RerankClient {
                 score = item.get("relevance_score").getAsFloat();
             }
 
-            RetrievedChunk hit;
-            if (score != null) {
-                hit = new RetrievedChunk(src.getId(), src.getText(), score);
-            } else {
-                hit = src;
-            }
-
+            RetrievedChunk hit = score != null ? new RetrievedChunk(src.getId(), src.getText(), score) : src;
             reranked.add(hit);
+            addedIds.add(src.getId());
 
             if (reranked.size() >= topN) {
                 break;
@@ -176,7 +169,7 @@ public class BaiLianRerankClient implements RerankClient {
 
         if (reranked.size() < topN) {
             for (RetrievedChunk c : candidates) {
-                if (!reranked.contains(c)) {
+                if (addedIds.add(c.getId())) {
                     reranked.add(c);
                 }
                 if (reranked.size() >= topN) {
@@ -188,60 +181,14 @@ public class BaiLianRerankClient implements RerankClient {
         return reranked;
     }
 
-    private AIModelProperties.ProviderConfig requireProvider(ModelTarget target) {
-        if (target == null || target.provider() == null) {
-            throw new IllegalStateException("BaiLian rerank provider config is missing");
-        }
-        return target.provider();
-    }
-
-    private String requireModel(ModelTarget target) {
-        if (target == null || target.candidate() == null || target.candidate().getModel() == null) {
-            throw new IllegalStateException("BaiLian rerank model name is missing");
-        }
-        return target.candidate().getModel();
-    }
-
-    private String resolveUrl(AIModelProperties.ProviderConfig provider, ModelTarget target) {
-        return ModelUrlResolver.resolveUrl(provider, target.candidate(), ModelCapability.RERANK);
-    }
-
-    private JsonObject parseJsonBody(ResponseBody body) throws IOException {
-        if (body == null) {
-            throw new ModelClientException("百炼 rerank 响应为空", ModelClientErrorType.INVALID_RESPONSE, null);
-        }
-        String content = body.string();
-        return gson.fromJson(content, JsonObject.class);
-    }
-
-    private String readBody(ResponseBody body) throws IOException {
-        if (body == null) {
-            return "";
-        }
-        return new String(body.bytes(), StandardCharsets.UTF_8);
-    }
-
     private JsonObject requireOutput(JsonObject respJson) {
         if (respJson == null || !respJson.has("output")) {
-            throw new ModelClientException("百炼 rerank 响应缺少 output", ModelClientErrorType.INVALID_RESPONSE, null);
+            throw new ModelClientException(provider() + " rerank 响应缺少 output", ModelClientErrorType.INVALID_RESPONSE, null);
         }
         JsonObject output = respJson.getAsJsonObject("output");
         if (output == null || !output.has("results")) {
-            throw new ModelClientException("百炼 rerank 响应缺少 results", ModelClientErrorType.INVALID_RESPONSE, null);
+            throw new ModelClientException(provider() + " rerank 响应缺少 results", ModelClientErrorType.INVALID_RESPONSE, null);
         }
         return output;
-    }
-
-    private ModelClientErrorType classifyStatus(int status) {
-        if (status == 401 || status == 403) {
-            return ModelClientErrorType.UNAUTHORIZED;
-        }
-        if (status == 429) {
-            return ModelClientErrorType.RATE_LIMITED;
-        }
-        if (status >= 500) {
-            return ModelClientErrorType.SERVER_ERROR;
-        }
-        return ModelClientErrorType.CLIENT_ERROR;
     }
 }

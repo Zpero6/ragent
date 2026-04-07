@@ -17,12 +17,15 @@
 
 package com.nageoffer.ai.ragent.infra.embedding;
 
-import com.google.gson.Gson;
+import cn.hutool.core.collection.CollUtil;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.nageoffer.ai.ragent.infra.config.AIModelProperties;
-import com.nageoffer.ai.ragent.infra.enums.ModelProvider;
 import com.nageoffer.ai.ragent.infra.enums.ModelCapability;
+import com.nageoffer.ai.ragent.infra.enums.ModelProvider;
 import com.nageoffer.ai.ragent.infra.http.HttpMediaTypes;
+import com.nageoffer.ai.ragent.infra.http.HttpResponseHelper;
 import com.nageoffer.ai.ragent.infra.http.ModelClientErrorType;
 import com.nageoffer.ai.ragent.infra.http.ModelClientException;
 import com.nageoffer.ai.ragent.infra.http.ModelUrlResolver;
@@ -33,12 +36,11 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
-import okhttp3.ResponseBody;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 @Service
@@ -47,7 +49,6 @@ import java.util.List;
 public class OllamaEmbeddingClient implements EmbeddingClient {
 
     private final OkHttpClient httpClient;
-    private final Gson gson = new Gson();
 
     @Override
     public String provider() {
@@ -56,107 +57,81 @@ public class OllamaEmbeddingClient implements EmbeddingClient {
 
     @Override
     public List<Float> embed(String text, ModelTarget target) {
-        AIModelProperties.ProviderConfig provider = requireProvider(target);
-        String url = resolveUrl(provider, target);
+        List<List<Float>> result = doEmbed(List.of(text), target);
+        return result.get(0);
+    }
+
+    @Override
+    public List<List<Float>> embedBatch(List<String> texts, ModelTarget target) {
+        if (CollUtil.isEmpty(texts)) {
+            return Collections.emptyList();
+        }
+        return doEmbed(texts, target);
+    }
+
+    /**
+     * 调用 Ollama /api/embed 接口，支持批量输入
+     * Ollama 的 input 字段同时支持 string 和 string[]，这里统一使用数组形式
+     */
+    private List<List<Float>> doEmbed(List<String> texts, ModelTarget target) {
+        AIModelProperties.ProviderConfig provider = HttpResponseHelper.requireProvider(target, provider());
+        String url = ModelUrlResolver.resolveUrl(provider, target.candidate(), ModelCapability.EMBEDDING);
 
         JsonObject body = new JsonObject();
-        body.addProperty("model", requireModel(target));
-        body.addProperty("input", text);
-        if (target.candidate().getDimension() != null) {
-            body.addProperty("dimensions", target.candidate().getDimension());
+        body.addProperty("model", HttpResponseHelper.requireModel(target, provider()));
+
+        JsonArray inputArray = new JsonArray();
+        for (String text : texts) {
+            inputArray.add(text);
         }
+        body.add("input", inputArray);
+        body.addProperty("dimensions", target.candidate().getDimension());
 
         Request request = new Request.Builder()
                 .url(url)
                 .post(RequestBody.create(body.toString(), HttpMediaTypes.JSON))
-                .addHeader("Content-Type", HttpMediaTypes.JSON_UTF8_HEADER)
                 .build();
 
         JsonObject json;
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                String errBody = readBody(response.body());
-                log.warn("Ollama embedding 请求失败: status={}, body={}", response.code(), errBody);
+                String errBody = HttpResponseHelper.readBody(response.body());
+                log.warn("{} embedding 请求失败: status={}, body={}", provider(), response.code(), errBody);
                 throw new ModelClientException(
-                        "Ollama embedding 请求失败: HTTP " + response.code(),
-                        classifyStatus(response.code()),
+                        provider() + " embedding 请求失败: HTTP " + response.code(),
+                        ModelClientErrorType.fromHttpStatus(response.code()),
                         response.code()
                 );
             }
-            json = parseJsonBody(response.body());
+            json = HttpResponseHelper.parseJson(response.body(), provider());
         } catch (IOException e) {
-            throw new ModelClientException("Ollama embedding 请求失败: " + e.getMessage(), ModelClientErrorType.NETWORK_ERROR, null, e);
+            throw new ModelClientException(provider() + " embedding 请求失败: " + e.getMessage(), ModelClientErrorType.NETWORK_ERROR, null, e);
         }
 
-        var embeddings = json.getAsJsonArray("embeddings");
-
+        JsonArray embeddings = json.getAsJsonArray("embeddings");
         if (embeddings == null || embeddings.isEmpty()) {
-            throw new ModelClientException("Ollama embeddings 为空", ModelClientErrorType.INVALID_RESPONSE, null);
+            throw new ModelClientException(provider() + " embeddings 为空", ModelClientErrorType.INVALID_RESPONSE, null);
         }
 
-        var first = embeddings.get(0).getAsJsonArray();
-        if (first == null || first.isEmpty()) {
-            throw new ModelClientException("Ollama embeddings 返回为空数组", ModelClientErrorType.INVALID_RESPONSE, null);
+        if (embeddings.size() != texts.size()) {
+            throw new ModelClientException(
+                    provider() + " embeddings 数量不匹配: 期望 " + texts.size() + "，实际 " + embeddings.size(),
+                    ModelClientErrorType.INVALID_RESPONSE, null);
         }
 
-        List<Float> vector = new ArrayList<>();
-        first.forEach(v -> vector.add(v.getAsFloat()));
-
-        return vector;
-    }
-
-    @Override
-    public List<List<Float>> embedBatch(List<String> texts, ModelTarget target) {
-        List<List<Float>> vectors = new ArrayList<>(texts.size());
-        for (String text : texts) {
-            vectors.add(embed(text, target));
+        List<List<Float>> results = new ArrayList<>(embeddings.size());
+        for (JsonElement embEl : embeddings) {
+            JsonArray embArr = embEl.getAsJsonArray();
+            if (embArr == null || embArr.isEmpty()) {
+                throw new ModelClientException(provider() + " embeddings 返回为空数组", ModelClientErrorType.INVALID_RESPONSE, null);
+            }
+            List<Float> vector = new ArrayList<>(embArr.size());
+            for (JsonElement v : embArr) {
+                vector.add(v.getAsFloat());
+            }
+            results.add(vector);
         }
-        return vectors;
-    }
 
-    private AIModelProperties.ProviderConfig requireProvider(ModelTarget target) {
-        if (target == null || target.provider() == null) {
-            throw new IllegalStateException("Ollama provider config is missing");
-        }
-        return target.provider();
-    }
-
-    private String requireModel(ModelTarget target) {
-        if (target == null || target.candidate() == null || target.candidate().getModel() == null) {
-            throw new IllegalStateException("Ollama model name is missing");
-        }
-        return target.candidate().getModel();
-    }
-
-    private String resolveUrl(AIModelProperties.ProviderConfig provider, ModelTarget target) {
-        return ModelUrlResolver.resolveUrl(provider, target.candidate(), ModelCapability.EMBEDDING);
-    }
-
-    private JsonObject parseJsonBody(ResponseBody body) throws IOException {
-        if (body == null) {
-            throw new ModelClientException("Ollama embedding 响应为空", ModelClientErrorType.INVALID_RESPONSE, null);
-        }
-        String content = body.string();
-        return gson.fromJson(content, JsonObject.class);
-    }
-
-    private String readBody(ResponseBody body) throws IOException {
-        if (body == null) {
-            return "";
-        }
-        return new String(body.bytes(), StandardCharsets.UTF_8);
-    }
-
-    private ModelClientErrorType classifyStatus(int status) {
-        if (status == 401 || status == 403) {
-            return ModelClientErrorType.UNAUTHORIZED;
-        }
-        if (status == 429) {
-            return ModelClientErrorType.RATE_LIMITED;
-        }
-        if (status >= 500) {
-            return ModelClientErrorType.SERVER_ERROR;
-        }
-        return ModelClientErrorType.CLIENT_ERROR;
+        return results;
     }
 }
