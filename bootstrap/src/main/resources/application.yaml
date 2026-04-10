@@ -122,6 +122,11 @@ ai:
       endpoints:
         chat: /v1/chat/completions
         embedding: /v1/embeddings
+    minimax:
+      url: https://api.minimaxi.com/v1
+      api-key: ${MINIMAX_API_KEY:}
+      endpoints:
+        chat: /chat/completions
 
   selection:
     failure-threshold: 2
@@ -152,6 +157,11 @@ ai:
         provider: ollama
         model: qwen3:8b-fp16
         priority: 2
+      - id: minimax-m2.7
+        provider: minimax
+        model: MiniMax-M2.7
+        supports-thinking: true
+        priority: 4
 
   embedding:
     default-model: qwen-emb-8b
